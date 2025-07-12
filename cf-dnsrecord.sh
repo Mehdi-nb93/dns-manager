@@ -53,6 +53,8 @@ validate_token_and_zone() {
     echo "CF_API_TOKEN=$CF_API_TOKEN" > "$CONFIG_FILE"
     echo "CF_DOMAIN=$CF_DOMAIN" >> "$CONFIG_FILE"
     echo "ZONE_ID=$ZONE_ID" >> "$CONFIG_FILE"
+    echo "CF_IP=${CF_IP:-}" >> "$CONFIG_FILE"
+
     echo -e "${GREEN}✅ Token and domain are valid.${NC}"
     return 0
 }
@@ -63,16 +65,31 @@ load_config() {
     fi
 }
 
+edit_ip() {
+    echo -e "\nCurrent IP for DNS records is: ${CF_IP:-Not set}"
+    echo "Enter new IP to use for DNS records (leave empty to use server public IP):"
+    read -rp "IP: " new_ip
+    if [[ -z "$new_ip" ]]; then
+        CF_IP=""
+    else
+        CF_IP="$new_ip"
+    fi
+    grep -v "^CF_IP=" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
+    echo "CF_IP=$CF_IP" >> "${CONFIG_FILE}.tmp"
+    mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    echo -e "${GREEN}✅ IP updated.${NC}"
+}
+
 add_dns_record() {
-    echo -e "\nEnter subdomain (e.g. iran.nbm.of.to):"
+    echo -e "\nEnter subdomain (e.g. sub.yourdomain.com):"
     read -rp "Subdomain: " SUBDOMAIN
 
-    echo "Enter IP address for the record (leave empty to use server's public IP):"
-    read -rp "IP: " IP
-
-    if [[ -z "$IP" ]]; then
+    if [[ -z "$CF_IP" ]]; then
         IP=$(curl -s https://api.ipify.org)
         echo "Using server IP: $IP"
+    else
+        IP="$CF_IP"
+        echo "Using configured IP: $IP"
     fi
 
     data=$(jq -n \
@@ -125,12 +142,10 @@ delete_dns_record() {
         return
     fi
 
-    records=($(echo "$response" | jq -r '.result[] | "\(.id) \(.name)"'))
-
-    echo -e "\nSelect a record to delete:"
     mapfile -t record_ids < <(echo "$response" | jq -r '.result[].id')
     mapfile -t record_names < <(echo "$response" | jq -r '.result[].name')
 
+    echo -e "\nSelect a record to delete:"
     for i in "${!record_ids[@]}"; do
         echo "$((i+1))) ${record_names[i]}"
     done
@@ -172,10 +187,9 @@ clear_api_token() {
         read -rp "Are you sure you want to delete it? (y/n): " confirm
         if [[ "$confirm" == "y" ]]; then
             rm -f "$CONFIG_FILE"
-            unset CF_API_TOKEN CF_DOMAIN ZONE_ID
+            unset CF_API_TOKEN CF_DOMAIN ZONE_ID CF_IP
             echo -e "${GREEN}✅ API token and config cleared.${NC}"
 
-            # Allow re-entering new token & domain
             while true; do
                 get_api_token
                 echo -e "\nEnter your domain:"
@@ -209,36 +223,33 @@ main_menu() {
     echo "1) Add DNS record"
     echo "2) Delete DNS record"
     echo "3) Show & Delete API Token"
-    echo "4) Remove script and config completely"
-    echo "5) Exit"
+    echo "4) Edit IP for DNS records"
+    echo "5) Remove script and config completely"
+    echo "6) Exit"
     read -rp "Choose an option: " choice
 
     case "$choice" in
         1) add_dns_record ;;
         2) delete_dns_record ;;
         3) clear_api_token ;;
-        4) remove_all ;;
-        5) echo "Goodbye!"; exit 0 ;;
+        4) edit_ip ;;
+        5) remove_all ;;
+        6) echo "Goodbye!"; exit 0 ;;
         *) echo "Invalid option." ;;
     esac
 }
 
-# --- Script start ---
+# Start
 
-# Load saved config if exists
 load_config
 
-# If no token or domain loaded, ask for them
-if [[ -z "$CF_API_TOKEN" || -z "$CF_DOMAIN" ]]; then
+if [[ -z "$CF_API_TOKEN" || -z "$CF_DOMAIN" || -z "$ZONE_ID" ]]; then
     get_api_token
     echo -e "\nEnter your domain:"
     read -rp "Domain: " CF_DOMAIN
+    validate_token_and_zone
 fi
 
-# Validate token and domain (with retry on failure)
-validate_token_and_zone
-
-# Main loop
 while true; do
     main_menu
 done
