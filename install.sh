@@ -1,19 +1,33 @@
 #!/bin/bash
 
+# رنگ‌ها برای زیبایی
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+# آدرس فایل اصلی
+REPO_URL="https://raw.githubusercontent.com/mehdi-nb93/dns-manager/main/cf-dnsrecord.sh"
 INSTALL_PATH="/usr/local/bin/cf-dnsrecord"
-SCRIPT_URL="https://raw.githubusercontent.com/mehdi-nb93/dns-manager/main/cf-dnsrecord.sh"  # ← تغییر بده
+CONFIG_DIR="/etc/cf-dnsrecord"
+CONFIG_FILE="$CONFIG_DIR/config"
 
-echo "⬇️ در حال نصب cf-dnsrecord از GitHub..."
+echo -e "${GREEN}[+] نصب ابزار مدیریت DNS کلودفلر...${NC}"
 
-curl -fsSL "$SCRIPT_URL" -o "$INSTALL_PATH"
+# ساخت مسیر پیکربندی
+mkdir -p "$CONFIG_DIR"
 
-if [[ ! -s "$INSTALL_PATH" ]]; then
-  echo "❌ دریافت اسکریپت با مشکل مواجه شد. URL را بررسی کن."
-  exit 1
+# دریافت اسکریپت اصلی
+curl -fsSL "$REPO_URL" -o "$INSTALL_PATH"
+
+# بررسی موفقیت دانلود
+if [ ! -s "$INSTALL_PATH" ]; then
+    echo "❌ دانلود اسکریپت ناموفق بود. آدرس بررسی شود."
+    exit 1
 fi
 
+# مجوز اجرایی
 chmod +x "$INSTALL_PATH"
 
-echo "✅ نصب انجام شد! حالا می‌تونی فقط با دستور زیر اجرا کنی:"
-echo ""
-echo "   cf-dnsrecord"
+# نمایش دستور استفاده
+echo -e "${GREEN}[✓] نصب با موفقیت انجام شد.${NC}"
+echo -e "📌 حالا می‌تونی از دستور زیر استفاده کنی:"
+echo -e "${GREEN}cf-dnsrecord${NC}"
