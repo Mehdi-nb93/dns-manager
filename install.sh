@@ -1,7 +1,7 @@
 #!/bin/bash
 
 INSTALL_PATH="/usr/local/bin/cf-dnsrecord"
-SCRIPT_URL="https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/cf-dns.sh"  # ← تغییر بده
+SCRIPT_URL="https://raw.githubusercontent.com/mehdi-nb93/dns-manager/main/cf-dnsrecord.sh"  # ← تغییر بده
 
 echo "⬇️ در حال نصب cf-dnsrecord از GitHub..."
 
