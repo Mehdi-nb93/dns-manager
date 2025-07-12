@@ -1,153 +1,244 @@
 #!/bin/bash
 
-CONFIG_DIR="/etc/cf-dns"
-CONFIG_FILE="$CONFIG_DIR/config"
-INSTALL_PATH="/usr/local/bin/cf-dns"
-SCRIPT_PATH="$(realpath "$0")"
-
-mkdir -p "$CONFIG_DIR"
-
-GREEN='\033[0;32m'
+# Colors
 RED='\033[0;31m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
 
-# Step 1: Get API Token
+CONFIG_FILE="$HOME/.cf_dns_manager.conf"
+
 get_api_token() {
-    echo -e "\n🔐 ${YELLOW}Enter your Cloudflare API Token:${NC}"
+    echo -e "\n🔐 Enter your Cloudflare API Token:"
     read -rp "API Token: " CF_API_TOKEN
 }
 
-# Step 2: Get Domain
-get_domain() {
-    echo -e "\n🌐 ${YELLOW}Enter your domain (e.g., example.com):${NC}"
-    read -rp "Domain: " CF_DOMAIN
+validate_token_and_zone() {
+    response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CF_DOMAIN" \
+        -H "Authorization: Bearer $CF_API_TOKEN" \
+        -H "Content-Type: application/json")
+
+    success=$(echo "$response" | jq -r '.success')
+    if [[ "$success" != "true" ]]; then
+        error_msg=$(echo "$response" | jq -r '.errors[0].message')
+        echo -e "${RED}❌ Error: $error_msg${NC}"
+
+        while true; do
+            echo -e "\n1) Re-enter API Token"
+            echo "2) Exit"
+            read -rp "Choose option: " opt
+            case "$opt" in
+                1)
+                    get_api_token
+                    echo -e "\nEnter your domain:"
+                    read -rp "Domain: " CF_DOMAIN
+                    validate_token_and_zone && break
+                    ;;
+                2)
+                    echo "Goodbye!"
+                    exit 0
+                    ;;
+                *)
+                    echo "Invalid option."
+                    ;;
+            esac
+        done
+    fi
+
+    ZONE_ID=$(echo "$response" | jq -r '.result[0].id')
+    if [[ -z "$ZONE_ID" || "$ZONE_ID" == "null" ]]; then
+        echo -e "${RED}❌ Zone ID not found for domain $CF_DOMAIN${NC}"
+        return 1
+    fi
+
+    echo "CF_API_TOKEN=$CF_API_TOKEN" > "$CONFIG_FILE"
+    echo "CF_DOMAIN=$CF_DOMAIN" >> "$CONFIG_FILE"
+    echo "ZONE_ID=$ZONE_ID" >> "$CONFIG_FILE"
+    echo -e "${GREEN}✅ Token and domain are valid.${NC}"
+    return 0
 }
 
-# Step 3: Validate
-validate_token_and_zone() {
-    ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CF_DOMAIN" \
-        -H "Authorization: Bearer $CF_API_TOKEN" \
-        -H "Content-Type: application/json" | jq -r '.result[0].id')
-
-    if [[ -z "$ZONE_ID" || "$ZONE_ID" == "null" ]]; then
-        echo -e "${RED}❌ Invalid token or domain. Please try again.${NC}"
-        return 1
-    else
-        echo "CF_API_TOKEN=$CF_API_TOKEN" > "$CONFIG_FILE"
-        echo "CF_DOMAIN=$CF_DOMAIN" >> "$CONFIG_FILE"
-        echo "ZONE_ID=$ZONE_ID" >> "$CONFIG_FILE"
-        echo -e "${GREEN}✅ Token and domain are valid.${NC}"
-        return 0
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
     fi
 }
 
-# Load saved config
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-fi
-
-# Ask for info if not set
-while [[ -z "$CF_API_TOKEN" || -z "$CF_DOMAIN" || -z "$ZONE_ID" ]]; do
-    get_api_token
-    get_domain
-    validate_token_and_zone || continue
-done
-
-# Get IP
-get_public_ip() {
-    curl -s https://api.ipify.org
-}
-
-# Add DNS
 add_dns_record() {
-    read -rp "Subdomain (e.g., sub.$CF_DOMAIN): " subdomain
-    read -rp "Custom IP (leave blank for server IP): " custom_ip
-    ip=${custom_ip:-$(get_public_ip)}
+    echo -e "\nEnter subdomain (e.g. iran.nbm.of.to):"
+    read -rp "Subdomain: " SUBDOMAIN
+
+    echo "Enter IP address for the record (leave empty to use server's public IP):"
+    read -rp "IP: " IP
+
+    if [[ -z "$IP" ]]; then
+        IP=$(curl -s https://api.ipify.org)
+        echo "Using server IP: $IP"
+    fi
+
+    data=$(jq -n \
+        --arg type "A" \
+        --arg name "$SUBDOMAIN" \
+        --arg content "$IP" \
+        --argjson proxied false \
+        '{type: $type, name: $name, content: $content, ttl: 1, proxied: $proxied}')
 
     response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
         -H "Authorization: Bearer $CF_API_TOKEN" \
         -H "Content-Type: application/json" \
-        --data "{\"type\":\"A\",\"name\":\"$subdomain\",\"content\":\"$ip\",\"ttl\":1,\"proxied\":false}")
+        --data "$data")
 
-    if echo "$response" | grep -q '"success":true'; then
+    success=$(echo "$response" | jq -r '.success')
+    if [[ "$success" == "true" ]]; then
         echo -e "${GREEN}✅ DNS record added successfully.${NC}"
     else
-        echo -e "${RED}❌ Failed to add record:${NC}"
-        echo "$response"
+        error_msg=$(echo "$response" | jq -r '.errors[0].message')
+        echo -e "${RED}❌ Failed to add DNS record: $error_msg${NC}"
     fi
 }
 
-# Delete DNS
-delete_dns_record() {
-    records=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+list_dns_records() {
+    response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?per_page=100" \
         -H "Authorization: Bearer $CF_API_TOKEN" \
         -H "Content-Type: application/json")
 
-    echo -e "\n📄 ${YELLOW}Available DNS records:${NC}"
-    echo "$records" | jq -r '.result[] | "\(.name) => \(.id)"' | nl -w2 -s'. '
+    success=$(echo "$response" | jq -r '.success')
+    if [[ "$success" != "true" ]]; then
+        error_msg=$(echo "$response" | jq -r '.errors[0].message')
+        echo -e "${RED}❌ Failed to list DNS records: $error_msg${NC}"
+        return 1
+    fi
 
-    mapfile -t ids < <(echo "$records" | jq -r '.result[].id')
-    mapfile -t names < <(echo "$records" | jq -r '.result[].name')
+    echo -e "\nDNS Records:"
+    echo "$response" | jq -r '.result[] | "\(.id) \(.type) \(.name) \(.content)"'
+}
 
-    read -rp "Select record number to delete: " index
-    record_id=${ids[$((index - 1))]}
-    record_name=${names[$((index - 1))]}
+delete_dns_record() {
+    echo -e "\nFetching DNS records..."
+    response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?per_page=100" \
+        -H "Authorization: Bearer $CF_API_TOKEN" \
+        -H "Content-Type: application/json")
 
-    if [ -n "$record_id" ]; then
-        read -rp "Are you sure you want to delete '$record_name'? (y/n): " confirm
+    success=$(echo "$response" | jq -r '.success')
+    if [[ "$success" != "true" ]]; then
+        error_msg=$(echo "$response" | jq -r '.errors[0].message')
+        echo -e "${RED}❌ Failed to fetch DNS records: $error_msg${NC}"
+        return
+    fi
+
+    records=($(echo "$response" | jq -r '.result[] | "\(.id) \(.name)"'))
+
+    echo -e "\nSelect a record to delete:"
+    mapfile -t record_ids < <(echo "$response" | jq -r '.result[].id')
+    mapfile -t record_names < <(echo "$response" | jq -r '.result[].name')
+
+    for i in "${!record_ids[@]}"; do
+        echo "$((i+1))) ${record_names[i]}"
+    done
+
+    read -rp "Enter number: " num
+
+    if ! [[ "$num" =~ ^[0-9]+$ ]] || ((num < 1 || num > ${#record_ids[@]})); then
+        echo -e "${RED}Invalid selection.${NC}"
+        return
+    fi
+
+    rec_id=${record_ids[$((num-1))]}
+    rec_name=${record_names[$((num-1))]}
+
+    read -rp "Are you sure you want to delete record $rec_name? (y/n): " confirm
+    if [[ "$confirm" != "y" ]]; then
+        echo "Deletion cancelled."
+        return
+    fi
+
+    del_response=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$rec_id" \
+        -H "Authorization: Bearer $CF_API_TOKEN" \
+        -H "Content-Type: application/json")
+
+    del_success=$(echo "$del_response" | jq -r '.success')
+    if [[ "$del_success" == "true" ]]; then
+        echo -e "${GREEN}✅ DNS record deleted successfully.${NC}"
+    else
+        del_error=$(echo "$del_response" | jq -r '.errors[0].message')
+        echo -e "${RED}❌ Failed to delete DNS record: $del_error${NC}"
+    fi
+}
+
+clear_api_token() {
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "\nYour current saved API Token is:"
+        grep CF_API_TOKEN "$CONFIG_FILE" | cut -d'=' -f2
+        echo
+        read -rp "Are you sure you want to delete it? (y/n): " confirm
         if [[ "$confirm" == "y" ]]; then
-            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$record_id" \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json"
-            echo -e "${GREEN}✅ DNS record deleted.${NC}"
+            rm -f "$CONFIG_FILE"
+            unset CF_API_TOKEN CF_DOMAIN ZONE_ID
+            echo -e "${GREEN}✅ API token and config cleared.${NC}"
+
+            # Allow re-entering new token & domain
+            while true; do
+                get_api_token
+                echo -e "\nEnter your domain:"
+                read -rp "Domain: " CF_DOMAIN
+                validate_token_and_zone && break
+            done
         else
-            echo -e "${YELLOW}Cancelled.${NC}"
+            echo "Deletion canceled."
         fi
     else
-        echo -e "${RED}❌ Invalid selection.${NC}"
+        echo "No API token found."
     fi
 }
 
-# Clear API token only
-clear_api_token() {
-    rm -f "$CONFIG_FILE"
-    unset CF_API_TOKEN CF_DOMAIN ZONE_ID
-    echo -e "${GREEN}✅ API token and config cleared.${NC}"
-}
-
-# Full uninstall
-full_uninstall() {
-    echo -e "\n⚠️ ${RED}This will remove the entire script and all config files.${NC}"
-    read -rp "Are you sure? (y/n): " confirm
+remove_all() {
+    echo -e "\nAre you sure you want to completely remove the script and all saved config? (y/n):"
+    read -rp "> " confirm
     if [[ "$confirm" == "y" ]]; then
         rm -f "$CONFIG_FILE"
-        rm -rf "$CONFIG_DIR"
-        [[ -f "$INSTALL_PATH" ]] && rm -f "$INSTALL_PATH"
-        [[ "$SCRIPT_PATH" != "$INSTALL_PATH" ]] && rm -f "$SCRIPT_PATH"
-        echo -e "${GREEN}✅ Script and config fully removed.${NC}"
+        script_path=$(realpath "$0")
+        rm -f "$script_path"
+        echo -e "${GREEN}✅ Script and config removed.${NC}"
         exit 0
     else
-        echo -e "${YELLOW}Uninstall canceled.${NC}"
+        echo "Operation canceled."
     fi
 }
 
-# Menu
-while true; do
-    echo -e "\n${YELLOW}--- Cloudflare DNS Manager ---${NC}"
+main_menu() {
+    echo -e "\n===== Cloudflare DNS Manager ====="
     echo "1) Add DNS record"
     echo "2) Delete DNS record"
-    echo "3) Clear saved API token"
-    echo "4) Uninstall script completely"
+    echo "3) Show & Delete API Token"
+    echo "4) Remove script and config completely"
     echo "5) Exit"
-    read -rp "Select an option: " choice
+    read -rp "Choose an option: " choice
 
     case "$choice" in
         1) add_dns_record ;;
         2) delete_dns_record ;;
         3) clear_api_token ;;
-        4) full_uninstall ;;
-        5) echo "👋 Goodbye!"; exit 0 ;;
-        *) echo -e "${RED}Invalid option.${NC}" ;;
+        4) remove_all ;;
+        5) echo "Goodbye!"; exit 0 ;;
+        *) echo "Invalid option." ;;
     esac
+}
+
+# --- Script start ---
+
+# Load saved config if exists
+load_config
+
+# If no token or domain loaded, ask for them
+if [[ -z "$CF_API_TOKEN" || -z "$CF_DOMAIN" ]]; then
+    get_api_token
+    echo -e "\nEnter your domain:"
+    read -rp "Domain: " CF_DOMAIN
+fi
+
+# Validate token and domain (with retry on failure)
+validate_token_and_zone
+
+# Main loop
+while true; do
+    main_menu
 done
